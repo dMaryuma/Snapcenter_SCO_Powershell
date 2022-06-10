@@ -1,5 +1,4 @@
-﻿# Written by Daniel Maryuma (Professional Services Consultant) dmaryuma@netapp.com #
-
+# Written by Daniel Maryuma (Professional Services Consultant) dmaryuma@netapp.com #
 
 # This script will demonstrate how to use common tasks such as Backup, Restore, Clone backup
 # The commands can be executed from /opt/NetApp/snapcenter/spl/bin/sccli
@@ -7,87 +6,74 @@
 
 # To install the module you can copy SnapCenter module from either SnapCenter Server or machine plug-in installed on
 # located in "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\SnapCenter
-$cred = Get-Credential
-Import-Module SnapCenter
-# You should have added the storage system connections and created the credential
-Open-SmConnection -Credential $cred -SMSbaseUrl https://192.168.0.92:8146
+$csv_path = "C:\Users\Administrator.DEMO\Documents\oracle_configs.csv"
+$config_xml = "C:\Users\Administrator.DEMO\Documents\config_orclcdb.xml"
+try{
+    $csv = import-csv $csv_path -Delimiter ","
+    $backup_config_xml = [xml](get-content $config_xml)
+    $cred = Get-Credential
+    Import-Module SnapCenter
+    # You should have added the storage system connections and created the credential
+    Open-SmConnection -Credential $cred -SMSbaseUrl https://snapctr.demo.netapp.com:8146
+}catch {Write-Host $_}
+
 
 $SmHosts = Get-SmHost
 $SmPolicies = Get-SmPolicy
 $SmResources = Get-SmResources -PluginCode 'SCO' -HostName $SmHosts[0].HostName -UseKnownResources
 $Resources = $SmHosts | Get-SmResources -PluginCode 'SCO' -UseKnownResources
+$SmResourceGroup = Get-SmResourceGroup
 
 
 
 ####################################### BACKUP ############################################
 
-
-# Create new Backup:
-# syntax for resources :  @{"Host"="scspr0101826001-sumanr.lab.netapp.com";"Oracle Database"="ong"}
-
-try{
-    $pos = $SmResources[0].DBId.IndexOf('\')
-    $BackupJob = New-SmBackup -Resources @{"Host"=$SmResources[0].DBId.Substring(0,$pos);"Oracle Database"=($SmResources[0].DBName)} -Policy $SmPolicies[0].Name -ErrorAction stop -Confirm:$false
-}catch{Write-Host $_}
-
-# Follow the job:
-# Get job detail
-$job = Get-SmJobSummaryReport -JobId $BackupJob.Id
-
-# Create new backup with verification on secondery system
-try{
-    $pos = $SmResources[0].DBId.IndexOf('\')
-    $BackupJob = New-SmBackup -Resources @{"Host"=$SmResources[0].DBId.Substring(0,$pos);"Oracle Database"=($SmResources[0].DBName)} -Policy $SmPolicies[0].Name -EnableVerification $true -VerifyOnSecondary $true -ErrorAction stop -Confirm:$false
-}catch{Write-Host $_}
+function SmBackup($SmHost,$SmDB,$SmPolicy){    
+    $BackupJob = New-SmBackup -Resources @{"Host"=$SmHost;"Oracle Database"=$SmDB} -Policy $SmPolicy -Confirm:$false
+    return $BackupJob
+}
 
 ####################################### Mount ############################################
-# get the backup you want to restore from
-# example - getting most recent backup for specific ResourceGroupName and Policy
-$SmBackup = ((get-smbackup -Details) | ?{$_.BackupType -like "Oracle Database Data Backup" -and $_.policyName -eq $SmPolicies[0].name -and $_.protectiongroupname -like $SmResourceGroup[0].Name} | Sort-Object -Property BackupTime -Descending)[0]
-$SmResource = Get-SmResources -PluginCode 'SCO' -HostName $SmHosts[0].HostName -UseKnownResources
-$SmMountJob = $SmBackup | New-SmMountBackup -AppObjectId $SmResources[0].DBId -HostName $SmHosts[1].HostName -Confirm:$false
 
-$job = Get-SmJobSummaryReport -JobId $SmMountJob.Id
-
+function SmMount($SmHost,$SmPolicy,$SmResourceGroup,$SmBackup,$SmInstance,$SmMountToHost){
+    $AppObjectID = "$SmHost\$SmInstance"
+    Write-Host $AppObjectID
+    Write-Host "Backup $($SmBackup) will be Mount on path:"
+    Write-Host "/var/opt/snapcenter/sco/backup_mount/$($SmBackup)/$SmResourceGroup"
+    $SmMountJob = New-SmMountBackup -AppObjectId $AppObjectID -HostName $SmMountToHost -BackupName $SmBackup -Confirm:$false -ErrorAction stop
+    return $SmMountJob
+}
 ####################################### UnMount ############################################
-# get all backups that are mounted
-$jobs = @{}
-$AllMountedBackups = get-smbackup -details | ?{$_.isMounted -eq $true}
-foreach ($MountedBackup in $AllMountedBackups){
-    $UnMountJob = New-SmUnmountBackup -BackupName $MountedBackup.backupname -Confirm:$false
-    $jobs += Get-SmJobSummaryReport -JobId $UnMountJob.id
+
+function SmUnmount($SmBackup){
+    $UnMountJob = New-SmUnmountBackup -BackupName $SmBackup.BackupName -Confirm:$false -ErrorAction stop
+    return $UnMountJob
 }
 
 ####################################### RESTORE ############################################
-# get the backup you want to restore from
-# example - getting most recent backup for specific ResourceGroupName and Policy
-$SmBackup = ((get-smbackup -Details) | ?{$_.BackupType -like "Oracle Database Data Backup" -and $_.policyName -eq $SmPolicies[0].name -and $_.protectiongroupname -like $SmResourceGroup[0].Name} | Sort-Object -Property BackupTime -Descending)[0]
-$SmResource = Get-SmResources -PluginCode 'SCO' -HostName $SmHosts[0].HostName -UseKnownResources
-try{
-    $SmRestoreJob = Restore-SmBackup -PluginCode 'SCO' -BackupName $SmBackup[0].BackupName -AppObjectId $SmResource[1].DBId -Confirm:$false -ErrorAction stop
-}catch{Write-Host $_}
 
-$job = Get-SmJobSummaryReport -JobId $SmRestoreJob.Id
-# Get status of job:
-$job | % -MemberName {write-host $_.JobName $_.Status}
+function SmRestore($SmHost,$SmBackup,$SmInstance){
+    $AppObjectID = "$SmHost\$SmInstance"
+    $SmRestoreJob = Restore-SmBackup -PluginCode 'SCO' -BackupName $SmBackup.BackupName -AppObjectId $SmInstance -Confirm:$false
+    return $SmRestoreJob
+}
 
 ####################################### CLONE ############################################
-# get the backup you want to restore from
-# example - getting most recent backup for specific ResourceGroupName and Policy
-$SmBackup = ((get-smbackup -Details) | ?{$_.BackupType -like "Oracle Database Data Backup" -and $_.policyName -eq $SmPolicies[0].name -and $_.protectiongroupname -like $SmResourceGroup[0].Name} | Sort-Object -Property BackupTime -Descending)[0]
-$SmResource = Get-SmResources -PluginCode 'SCO' -HostName $SmHosts[0].HostName -UseKnownResources
-try{
-    $SmCloneJob = New-SmClone -BackupName $SmBackup.BackupName `
-    -Resources @{"Host"=$SmResources[0].DBId.Substring(0,$pos);"Oracle Database"=($SmResources[0].DBName)} `
-    -CloneToInstance $SmResources[0].DBId `
+
+function SmClone($SmBackup,$SmHost,$SmInstance,$SmCloneToInstance,$BackupConfigXML){
+    $AppObjectID = "$SmHost\$SmInstance"
+
+    $SmCloneJob = New-SmClone -BackupName $BackupConfigXML.'oracle-clone-specification'.backupname `
+    -Resources @{"Host"=$SmHost;"Oracle Database"=$SmInstance} `
+    -CloneToInstance $SmCloneToInstance `
+    -DatabaseSID $BackupConfigXML.'oracle-clone-specification'.'clone-database-sid' `
     -LogRestoreType All `
     -AppPluginCode SCO `
-    -OracleOsUserName sys `
+    -OracleOsUserName oracle `
     -OracleOsUserGroup oinstall `
     -AutoAssignMountPoint `
     -ControlFileConfiguration @{"FilePath"=""}
-
-}catch{Write-Host $_}
+}
 
 ####################################### REFRESH CLONE ############################################
 
@@ -96,11 +82,72 @@ try{
     logNumber"="3";"TotalSize"="50";"BlockSize"="512"},@{"FilePath"="/MntPt_StaDB/Data_Clon32/Clon32/redolog/redo02.log";"RedologNumber"="2";"TotalSize"="50";"BlockSize"="512"},@{"FilePath"="/MntPt_StaDB/Data_Clon32/Clon32/redolog/redo03.log";"RedologNumber"="1";"TotalS
     ize"="50";"BlockSize"="512"} -CustomParameters @{"Key" = "audit_file_dest";"Value"="/var/test"} -archivedlocators @{Primary="10.225.118.251:auto_nfs_data";Secondary="ongqathree_man:ongqaone_man_auto_nfs_data_vault"} -logarchivedlocators
     @{Primary="10.225.118.251:auto_nfs_log";Secondary="ongqathree_man:ongqaone_man_auto_nfs_log_vault"}
-# Jobs
-get-smbackupreport
 
-# get-smbackup
+function FollowJob($job){
+    while($true){
+    $jobLog = Get-SmJobSummaryReport -JobId $job.Id
+    $date = get-date
+    if (!$job){Write-Host "No jobs to follow";break}
+    if ($jobLog.Status -like "Completed"){
+        $jobLog
+        Write-Host "jobLog $($jobLog.SmJobId) finished Suucesfully" -ForegroundColor Green
+        break
+    }elseif ($jobLog.Status -like "Failed"){
+        Write-Host "jobLog $($jobLog.SmJobId) Failed:" -ForegroundColor red
+        Write-Host $jobLog.JobError
+        break
+    }else{
+        Write-Host "job $($jobLog.SmJobId) Still Running..."
+        $jobLog
+        Start-Sleep 5}
+    if ($date.AddSeconds($TimeLimit) -lt (get-date)){
+        Write-Host "Time for job exceeds"
+        break
+    }
+}
+}
 
-# (get-smbackup -Details)[0] 
+###################### MAIN #######################
+$TimeLimit = 180 # Limit seconds for running a job
 
-# (get-smbackup)[0] |  Get-SmBackupReport
+# Create Backup:
+try{
+    $BackupJob = SmBackup -SmHost $csv[0].Host -SmDB $csv[0].InstanceName -SmPolicy ORACLE_DAILY
+}catch{Write-Host $_}
+
+# Follow job
+FollowJob -job $BackupJob
+
+# Mount Backup: #### Cannot mount to other host.. ####
+try{
+    $SmBackups = get-smbackup -Details | ?{$_.isMounted -notlike "true"} -ErrorAction stop
+    $SmBackup = ($SmBackups | ?{$_.BackupType -like "Oracle Database Data Backup" -and $_.policyName -eq "ORACLE_DAILY" -and $_.protectiongroupname -like $csv[0].SmResourceGroup} | Sort-Object -ErrorAction stop -Property BackupTime -Descending)[0] 
+    Write-Host "The Backup that will be mount: "
+    Write-Host $SmBackup.BackupName
+    $SmMountJob = SmMount -SmHost $csv[0].Host -SmPolicy "ORACLE_DAILY" -SmResourceGroup $csv[0].SmResourceGroup -SmBackup $SmBackup.BackupName -SmInstance $csv[0].InstanceName -SmMountToHost $csv[0].MountToHost
+}catch{
+    if ($Error[0].Exception.Message -like "*Cannot index into a null array*"){
+        Write-Host "Cannot index into a null array"
+        Write-Host "No Backups found to sepcify the request"
+    }
+    else {Write-Host $_}
+}
+FollowJob -job $SmMountJob
+
+# UnMount Backup:
+try{
+    $SmBackups = get-smbackup -Details | ?{$_.isMounted -like "true"} -ErrorAction stop
+    $SmBackup = ($SmBackups | ?{$_.BackupType -like "Oracle Database Data Backup" -and $_.policyName -eq "ORACLE_DAILY" -and $_.protectiongroupname -like $csv[0].SmResourceGroup} | Sort-Object -ErrorAction stop -Property BackupTime -Descending)[0] 
+    Write-Host "The Backup that will be Unmount: "
+    Write-Host "$($SmBackup.BackupName)"
+    $SmUnMountJob = SmUnmount -SmBackup $SmBackup
+}catch{
+    if ($Error[0].Exception.Message -like "*Cannot index into a null array*"){
+        Write-Host "Cannot index into a null array"
+        Write-Host "No Backups found to sepcify the request"
+    }
+    else {Write-Host $_}
+}
+FollowJob -job $SmUnMountJob
+
+# Restore from Backup:
